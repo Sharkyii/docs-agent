@@ -1,0 +1,33 @@
+name: Issue Quality Review
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  models: read
+
+jobs:
+  review:
+    if: >
+      github.event.issue.pull_request == null &&
+      startsWith(github.event.comment.body, '/review-issue') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python scripts/issue_quality_review.py
