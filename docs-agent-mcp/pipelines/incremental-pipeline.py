@@ -12,7 +12,7 @@ from utils import DEFAULT_EMBEDDING_BATCH_SIZE, DOCS_COLLECTION
 
 @dsl.component(
     base_image="docker.io/library/python:3.9",
-    packages_to_install=["requests", "beautifulsoup4"]
+    packages_to_install=["requests==2.34.2", "beautifulsoup4==4.15.0"]
 )
 def download_specific_files(
     repo_owner: str,
@@ -94,7 +94,7 @@ def download_specific_files(
 
 @dsl.component(
     base_image="docker.io/library/python:3.9",
-    packages_to_install=["pymilvus"]
+    packages_to_install=["pymilvus==2.6.14"]
 )
 def delete_old_vectors(
     file_paths: str,  # JSON string of file paths list
@@ -172,7 +172,7 @@ def delete_old_vectors(
 
 @dsl.component(
     base_image="python:3.11-slim",
-    packages_to_install=["requests", "langchain-text-splitters"],
+    packages_to_install=["requests==2.34.2", "langchain-text-splitters==1.1.2"],
 )
 def chunk_and_embed_incremental(
     github_data: dsl.Input[dsl.Dataset],
@@ -292,7 +292,7 @@ def chunk_and_embed_incremental(
 
 @dsl.component(
     base_image="docker.io/library/python:3.9",
-    packages_to_install=["pymilvus", "numpy"]
+    packages_to_install=["pymilvus==2.6.14", "numpy==2.2.6"]
 )
 def store_milvus_incremental(
     embedded_data: dsl.Input[dsl.Dataset],
