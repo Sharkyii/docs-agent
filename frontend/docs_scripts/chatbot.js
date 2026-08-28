@@ -330,6 +330,88 @@ function createChatbotElements() {
     }
 }
 
+function escapeMarkdownHtml(text) {
+    return String(text).replace(/[&<>"']/g, function(character) {
+        const entities = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        };
+        return entities[character];
+    });
+}
+
+// Small, dependency-free Markdown subset used by streamed and completed chat
+// messages. Code is protected before other formatting so YAML and shell
+// snippets are never interpreted as links or replacement-string tokens.
+function formatChatMarkdown(text, isStreaming = false) {
+    if (!text) return '';
+
+    let formatted = text;
+    const codeBlockPlaceholders = [];
+    const inlineCodePlaceholders = [];
+
+    function preserveCodeBlock(language, code, trimCode) {
+        const placeholder = `__CODE_BLOCK_${codeBlockPlaceholders.length}__`;
+        const safeLanguage = language || 'text';
+        const codeText = trimCode ? code.trim() : code;
+        codeBlockPlaceholders.push(
+            `<pre><code class="language-${safeLanguage}">${escapeMarkdownHtml(codeText)}</code></pre>`
+        );
+        return placeholder;
+    }
+
+    const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
+    formatted = formatted.replace(codeBlockRegex, function(match, language, code) {
+        return preserveCodeBlock(language, code, !isStreaming);
+    });
+
+    if (isStreaming) {
+        const incompleteCodeRegex = /```(\w+)?\n([\s\S]*)$/;
+        if (incompleteCodeRegex.test(formatted) && !formatted.endsWith('```')) {
+            formatted = formatted.replace(incompleteCodeRegex, function(match, language, code) {
+                return preserveCodeBlock(language, code, false);
+            });
+        }
+    }
+
+    formatted = formatted.replace(/`([^`\n]+)`/g, function(match, code) {
+        const placeholder = `__INLINE_CODE_${inlineCodePlaceholders.length}__`;
+        inlineCodePlaceholders.push(`<code>${escapeMarkdownHtml(code)}</code>`);
+        return placeholder;
+    });
+
+    // Linkify only explicit http(s) Markdown links. Other schemes remain
+    // visible as text instead of becoming executable browser destinations.
+    formatted = formatted.replace(
+        /\[([^\]\n]+)\]\((https?:\/\/[^\s<>"')]+)\)/gi,
+        function(match, label, url) {
+            return `<a href="${escapeMarkdownHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeMarkdownHtml(label)}</a>`;
+        }
+    );
+
+    formatted = formatted.replace(/\n/g, '<br>');
+    formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+    inlineCodePlaceholders.forEach(function(inlineCode, index) {
+        formatted = formatted.replace(`__INLINE_CODE_${index}__`, function() {
+            return inlineCode;
+        });
+    });
+
+    codeBlockPlaceholders.forEach(function(codeBlock, index) {
+        // A function replacement is required: replacement strings interpret
+        // sequences such as $&, $1, and $' that commonly occur in code/YAML.
+        formatted = formatted.replace(`__CODE_BLOCK_${index}__`, function() {
+            return codeBlock;
+        });
+    });
+
+    return formatted;
+}
+
 document.addEventListener('DOMContentLoaded', async function() {
     console.log('Docs Bot Initialized (v1.1.0 - Kagent A2A, configurable URL)');
     
@@ -677,6 +759,156 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
         }
     }
+    // --- Anonymous session tokens ------------------------------------------
+    // The gateway can require a short-lived session JWT on the agent paths.
+    // There are no user accounts: the widget silently fetches an anonymous
+    // token on first use and re-fetches it when the gateway rejects one.
+    // Harmless when the gateway does not enforce sessions — the header is
+    // simply ignored.
+    const SESSION_PATH = '/api/session';
+    // Refresh this many ms before expiry so a request never races the clock.
+    const SESSION_REFRESH_MARGIN_MS = 60 * 1000;
+
+    let sessionToken = null;
+    let sessionExpiresAt = 0;
+    let sessionFetch = null;
+
+    function getSessionUrl() {
+        return new URL(SESSION_PATH, getAPIUrl()).toString();
+    }
+
+    // Decode a JWT payload without verifying it. Safe here because we are not
+    // trusting the token, only reading the `exp` we were just handed in order
+    // to decide when to ask for the next one — the gateway does the verifying.
+    function decodeJwtPayload(token) {
+        const payload = String(token).split('.')[1];
+        if (!payload) {
+            return null;
+        }
+        // base64url -> base64, restoring the padding atob() insists on.
+        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+        try {
+            return JSON.parse(atob(padded));
+        } catch (error) {
+            return null;
+        }
+    }
+
+    // Work out, in *browser* time, when this token stops being usable.
+    //
+    // Istio validates the token's `exp`, which is stamped in server time,
+    // while the widget can only compare against Date.now(), which is browser
+    // time. Comparing the two directly is wrong: a laptop with a skewed clock
+    // (resumed from sleep, bad NTP) would disagree with the gateway about when
+    // the token dies, and if it believes it has longer than it really does,
+    // every request in that window fails.
+    //
+    // So never compare across clocks. Take the token's *lifetime* — exp minus
+    // iat, both server-clock, so the skew cancels out — and anchor it to the
+    // moment we asked for it. `expires_in` is kept as a second opinion, and we
+    // take whichever expires first: refreshing early costs one extra mint,
+    // while trusting a dead token costs a failed request in the user's face.
+    function computeSessionExpiry(data, requestedAt) {
+        const candidates = [];
+
+        const claims = decodeJwtPayload(data.access_token);
+        if (claims && typeof claims.exp === 'number' && typeof claims.iat === 'number'
+            && claims.exp > claims.iat) {
+            candidates.push(requestedAt + ((claims.exp - claims.iat) * 1000));
+        }
+
+        const ttlSeconds = Number(data.expires_in);
+        if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+            candidates.push(requestedAt + (ttlSeconds * 1000));
+        }
+
+        // Neither source usable: treat the token as already stale so the next
+        // send re-mints rather than confidently sending something dead.
+        return candidates.length ? Math.min.apply(null, candidates) : 0;
+    }
+
+    function isSessionTokenUsable(now = Date.now()) {
+        return Boolean(sessionToken) && now < sessionExpiresAt;
+    }
+
+    function isSessionTokenFresh(now = Date.now()) {
+        return Boolean(sessionToken) && now < sessionExpiresAt - SESSION_REFRESH_MARGIN_MS;
+    }
+
+    async function fetchSessionToken() {
+        const requestedAt = Date.now();
+        const response = await fetch(getSessionUrl(), { method: 'POST' });
+        if (!response.ok) {
+            throw new Error(`session request failed: ${response.status}`);
+        }
+        const data = await response.json();
+        sessionToken = data.access_token;
+        sessionExpiresAt = computeSessionExpiry(data, requestedAt);
+        return sessionToken;
+    }
+
+    // Returns a valid token, minting one if absent, near expiry, or already
+    // past it. Concurrent callers share a single in-flight request.
+    async function getSessionToken({ forceRefresh = false } = {}) {
+        if (forceRefresh) {
+            sessionToken = null;
+            sessionExpiresAt = 0;
+        }
+        if (isSessionTokenFresh()) {
+            return sessionToken;
+        }
+        // Remember the token we are replacing: a *proactive* refresh (we are
+        // inside the margin but not actually expired yet) must not throw away
+        // a working token just because the issuer blipped.
+        const previousToken = sessionToken;
+        const previouslyUsable = isSessionTokenUsable();
+
+        if (!sessionFetch) {
+            sessionFetch = fetchSessionToken().finally(() => { sessionFetch = null; });
+        }
+        try {
+            return await sessionFetch;
+        } catch (error) {
+            if (previouslyUsable) {
+                console.warn('Session refresh failed; reusing the current token until it expires:', error);
+                return previousToken;
+            }
+            throw error;
+        }
+    }
+
+    // POST to the agent with a session token attached. A 401/403 means the
+    // token was rejected (expired, or the signing key rotated), so mint a
+    // fresh one and retry exactly once.
+    async function postToAgent(payload) {
+        const send = async (token) => fetch(getAPIUrl(), {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream',
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+            },
+            body: JSON.stringify(payload)
+        });
+
+        let token = null;
+        try {
+            token = await getSessionToken();
+        } catch (error) {
+            // Session endpoint unavailable (e.g. gateway without session auth).
+            // Fall through unauthenticated rather than blocking the chat.
+            console.warn('Could not obtain a session token:', error);
+        }
+
+        let response = await send(token);
+        if (token && (response.status === 401 || response.status === 403)) {
+            console.log('Session token rejected — refreshing and retrying');
+            response = await send(await getSessionToken({ forceRefresh: true }));
+        }
+        return response;
+    }
+
     // API connection status
     let isConnected = false;
 
@@ -713,15 +945,11 @@ document.addEventListener('DOMContentLoaded', async function() {
                 id: rpcId
             };
             
-            const response = await fetch(getAPIUrl(), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'text/event-stream'
-                },
-                body: JSON.stringify(payload)
-            });
-            
+            const response = await postToAgent(payload);
+
+            if (response.status === 429) {
+                throw new Error('Rate limit reached — please wait a moment and try again.');
+            }
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
@@ -870,7 +1098,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             const paragraph = currentMessageDiv.querySelector('p');
             
             // Format streaming content
-            const formattedText = formatMarkdown(currentMessageContent, true);
+            const formattedText = formatChatMarkdown(currentMessageContent, true);
             paragraph.innerHTML = formattedText;
             
             // Apply syntax highlighting to any new code blocks
@@ -1174,66 +1402,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Auto-save every 30 seconds
     setInterval(autoSaveCurrentChat, 30000);
 
-    // Utility function to format text
-    function formatMarkdown(text, isStreaming = false) {
-        if (!text) return '';
-        
-        let formatted = text;
-        const codeBlockPlaceholders = [];
-        let placeholderIndex = 0;
-        
-        // Handle code blocks first (triple backticks) and replace with placeholders
-        if (isStreaming) {
-            // For streaming, be more careful with incomplete code blocks
-            const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
-            formatted = formatted.replace(codeBlockRegex, function(match, lang, code) {
-                const language = lang || 'text';
-                const placeholder = `__CODE_BLOCK_${placeholderIndex}__`;
-                codeBlockPlaceholders[placeholderIndex] = `<pre><code class="language-${language}">${escapeHtml(code.trim())}</code></pre>`;
-                placeholderIndex++;
-                return placeholder;
-            });
-            
-            // Handle incomplete code blocks at the end
-            const incompleteCodeRegex = /```(\w+)?\n([\s\S]*)$/;
-            if (incompleteCodeRegex.test(formatted) && !formatted.endsWith('```')) {
-                formatted = formatted.replace(incompleteCodeRegex, function(match, lang, code) {
-                    const language = lang || 'text';
-                    const placeholder = `__CODE_BLOCK_${placeholderIndex}__`;
-                    codeBlockPlaceholders[placeholderIndex] = `<pre><code class="language-${language}">${escapeHtml(code)}</code></pre>`;
-                    placeholderIndex++;
-                    return placeholder;
-                });
-            }
-        } else {
-            // For complete text, handle normally
-            const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
-            formatted = formatted.replace(codeBlockRegex, function(match, lang, code) {
-                const language = lang || 'text';
-                const placeholder = `__CODE_BLOCK_${placeholderIndex}__`;
-                codeBlockPlaceholders[placeholderIndex] = `<pre><code class="language-${language}">${escapeHtml(code.trim())}</code></pre>`;
-                placeholderIndex++;
-                return placeholder;
-            });
-        }
-        
-        // Handle inline code (single backticks) - avoid already processed code blocks
-        formatted = formatted.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-        
-        // Handle line breaks (only outside code blocks)
-        formatted = formatted.replace(/\n/g, '<br>');
-        
-        // Handle bold text
-        formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        
-        // Restore code blocks from placeholders
-        codeBlockPlaceholders.forEach((codeBlock, index) => {
-            formatted = formatted.replace(`__CODE_BLOCK_${index}__`, codeBlock);
-        });
-        
-        return formatted;
-    }
-
     function handleSendMessage() {
         const message = userInput.value.trim();
         if (!message || isTyping) return;
@@ -1288,7 +1456,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         
         // Format the text based on sender
         if (sender === 'bot') {
-            paragraph.innerHTML = formatMarkdown(text);
+            paragraph.innerHTML = formatChatMarkdown(text);
             
             // Apply syntax highlighting after DOM insertion
             setTimeout(() => {
@@ -1436,12 +1604,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         if (chatMessages) {
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
-    }
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
     }
 
     console.log('Chatbot initialized with chat stack system');
