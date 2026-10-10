@@ -33,7 +33,7 @@ def rerank_hits(query: str, hits: list[dict], timeout: int = DEFAULT_TIMEOUT_SEC
     except Exception as exc:
         print(f"Reranker failed: {exc}")
         return hits
-        
+
     payload = response.json()
     if not isinstance(payload, list):
         print(f"Reranker returned unexpected format: {type(payload)}")
@@ -48,10 +48,10 @@ def rerank_hits(query: str, hits: list[dict], timeout: int = DEFAULT_TIMEOUT_SEC
         if isinstance(idx, int) and 0 <= idx < len(hits):
             hit = hits[idx].copy()
             # Replace distance with cross-encoder score so downstream can see it
-            hit["distance"] = score 
+            hit["distance"] = score
             hit["reranked"] = True
             reranked.append(hit)
-            
+
     # Fallback for hits that weren't returned
     seen_indices = {item.get("index") for item in payload if isinstance(item.get("index"), int)}
     for i, hit in enumerate(hits):
@@ -59,6 +59,6 @@ def rerank_hits(query: str, hits: list[dict], timeout: int = DEFAULT_TIMEOUT_SEC
             reranked.append(hit)
 
     # Sort strictly by the new cross-encoder score descending
-    reranked.sort(key=lambda x: x.get("distance", -float('inf')), reverse=True)
+    reranked.sort(key=lambda x: x.get("distance", -float("inf")), reverse=True)
     print(f"Reranker: scored and reordered {len(reranked)} hits via cross-encoder")
     return reranked

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 
 import embeddings_client
@@ -10,7 +9,7 @@ import embeddings_client
 
 def compress_hits(query: str, hits: list[dict], max_chars: int) -> list[dict]:
     """Compress hits extractively to fit within max_chars.
-    
+
     Splits each hit's text into sentences, embeds them, scores them against
     the query embedding, and keeps only the highest-scoring sentences until
     the character limit is reached.
@@ -26,7 +25,7 @@ def compress_hits(query: str, hits: list[dict], max_chars: int) -> list[dict]:
 
     # Sentence boundary regex (basic approximation)
     # Matches punctuation followed by whitespace and a capital letter, or newlines
-    sentence_splitter = re.compile(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s+(?=[A-Z])|\n+')
+    sentence_splitter = re.compile(r"(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s+(?=[A-Z])|\n+")
 
     all_sentences = []
     # Keep track of which hit and which sentence index each sentence belongs to
@@ -34,14 +33,16 @@ def compress_hits(query: str, hits: list[dict], max_chars: int) -> list[dict]:
         content = hit.get("entity", {}).get("content_text", "")
         if not content:
             continue
-            
+
         sentences = [s.strip() for s in sentence_splitter.split(content) if s.strip()]
         for sent_idx, text in enumerate(sentences):
-            all_sentences.append({
-                "hit_idx": hit_idx,
-                "sent_idx": sent_idx,
-                "text": text,
-            })
+            all_sentences.append(
+                {
+                    "hit_idx": hit_idx,
+                    "sent_idx": sent_idx,
+                    "text": text,
+                }
+            )
 
     if not all_sentences:
         return hits
@@ -57,7 +58,7 @@ def compress_hits(query: str, hits: list[dict], max_chars: int) -> list[dict]:
     # Compute cosine similarity
     for s_info, s_emb in zip(all_sentences, sent_embeddings):
         # dot product for cosine similarity (assuming normalized vectors, which TEI all-mpnet usually does)
-        # TEI all-mpnet-base-v2 returns normalized vectors. 
+        # TEI all-mpnet-base-v2 returns normalized vectors.
         score = sum(a * b for a, b in zip(query_embedding, s_emb))
         s_info["score"] = score
 
@@ -91,11 +92,13 @@ def compress_hits(query: str, hits: list[dict], max_chars: int) -> list[dict]:
         # Sort sentences in this hit back to their original document order
         hit_sentences = sorted(hits_to_keep[h_idx], key=lambda x: x["sent_idx"])
         combined_text = " ... ".join(s["text"] for s in hit_sentences)
-        
+
         hit_copy = hits[h_idx].copy()
         hit_copy["entity"] = hit_copy["entity"].copy()
         hit_copy["entity"]["content_text"] = combined_text
         compressed_hits.append(hit_copy)
 
-    print(f"Compressor: reduced {len(all_sentences)} sentences to {len(selected_sentences)} ({current_chars}/{max_chars} chars)")
+    print(
+        f"Compressor: reduced {len(all_sentences)} sentences to {len(selected_sentences)} ({current_chars}/{max_chars} chars)"
+    )
     return compressed_hits

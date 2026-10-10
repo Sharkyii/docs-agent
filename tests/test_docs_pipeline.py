@@ -291,13 +291,13 @@ def test_store_rejects_embedding_dim_mismatch(monkeypatch, tmp_path):
         mock_client.describe_collection.return_value = {"description": "v=4"}
         mock_client.query.return_value = [{"id": 1}, {"id": 2}]
         if "queried" in locals():
-            mock_client.query.side_effect = lambda collection_name, filter, **kwargs: queried.append(filter) or [{"id": 1}, {"id": 2}]
+            mock_client.query.side_effect = lambda collection_name, filter, **kwargs: queried.append(filter) or [{"id": 1}, {"id": 2}]  # noqa: F821
         if "deleted" in locals():
-            mock_client.delete.side_effect = lambda collection_name, filter, **kwargs: deleted.append(filter) or {"delete_count": 2}
+            mock_client.delete.side_effect = lambda collection_name, filter, **kwargs: deleted.append(filter) or {"delete_count": 2}  # noqa: F821
         else:
             mock_client.delete.return_value = {"delete_count": 2}
         if "inserted" in locals():
-            mock_client.insert.side_effect = lambda collection_name, data, **kwargs: inserted.extend(data)
+            mock_client.insert.side_effect = lambda collection_name, data, **kwargs: inserted.extend(data)  # noqa: F821
         monkeypatch.setattr(milvus_store, "MilvusClient", lambda *args, **kwargs: mock_client)
         
         module.store_milvus.python_func(
