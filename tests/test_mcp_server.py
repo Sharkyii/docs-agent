@@ -3,7 +3,6 @@
 Mocks pymilvus and embeddings HTTP calls — no in-process sentence-transformers.
 """
 
-import json
 import sys
 import importlib.util
 from pathlib import Path
@@ -16,13 +15,13 @@ def _tool_payload(result) -> dict:
     """Parse JSON returned by search_* MCP tools, or convert ToolResult."""
     if isinstance(result, str):
         return __import__("json").loads(result)
-    
+
     content_text = ""
     if isinstance(result.content, list):
         content_text = "".join(item.text for item in result.content if hasattr(item, "text"))
     else:
         content_text = str(result.content)
-        
+
     payload = {"markdown_summary": content_text}
     if result.structured_content:
         payload.update(result.structured_content)
@@ -40,13 +39,14 @@ server = importlib.util.module_from_spec(spec)
 sys.modules["docs_agent_mcp_server"] = server
 spec.loader.exec_module(server)
 
-import milvus_search
+import milvus_search  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def reset_server_globals():
     """Reset server globals before each test so state doesn't leak."""
     import milvus_search
+
     original_client = milvus_search.client
     original_password = milvus_search.MILVUS_PASSWORD
     milvus_search.MILVUS_PASSWORD = "test-password"
@@ -60,13 +60,14 @@ def inject_mocks(mock_milvus_client):
     """Inject mock Milvus client and fixed query embedding."""
     import milvus_search
     import embeddings_client
+
     milvus_search.client = mock_milvus_client
     fake_vector = [0.0] * 768
-    
+
     # We must patch embed_query where milvus_search imported it, plus the compressor's usage.
     with patch.object(milvus_search, "embed_query", return_value=fake_vector) as embed_mock:
         with patch.object(embeddings_client, "embed_query", return_value=fake_vector):
-            with patch.object(embeddings_client, "embed_texts", return_value=[fake_vector]*100):
+            with patch.object(embeddings_client, "embed_texts", return_value=[fake_vector] * 100):
                 yield mock_milvus_client, embed_mock
 
 
