@@ -85,7 +85,6 @@ def test_escapes_markdown_link_label_and_query_delimiter():
     assert "<img" not in rendered
 
 
-
 @pytest.mark.parametrize("streaming", [False, True])
 def test_preserves_dollar_sequences_and_links_inside_fenced_yaml(streaming):
     closing_fence = "" if streaming else "```"

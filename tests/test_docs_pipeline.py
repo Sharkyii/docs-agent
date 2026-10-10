@@ -142,12 +142,16 @@ def test_docs_cleaner_preserves_markdown_link_adjacent_yaml(monkeypatch, tmp_pat
     class FakeEmbeddingResponse:
         def __init__(self, inputs=None):
             self.inputs = inputs or []
+
         def raise_for_status(self):
             return None
+
         def json(self):
             return [[0.0] * 768] * len(self.inputs)
 
-    monkeypatch.setattr("requests.post", lambda *args, **kwargs: FakeEmbeddingResponse(kwargs.get("json", {}).get("inputs", [])))
+    monkeypatch.setattr(
+        "requests.post", lambda *args, **kwargs: FakeEmbeddingResponse(kwargs.get("json", {}).get("inputs", []))
+    )
     source_path = tmp_path / "docs.jsonl"
     source_path.write_text(
         json.dumps(
@@ -284,29 +288,32 @@ def test_store_rejects_embedding_dim_mismatch(monkeypatch, tmp_path):
     input_path.write_text("{}" + "\n")
 
     with pytest.raises(RuntimeError, match="vector_dim=768"):
-
         import milvus_store
+
         mock_client = MagicMock()
         mock_client.has_collection.return_value = True
         mock_client.describe_collection.return_value = {"description": "v=4"}
         mock_client.query.return_value = [{"id": 1}, {"id": 2}]
         if "queried" in locals():
-            mock_client.query.side_effect = lambda collection_name, filter, **kwargs: queried.append(filter) or [{"id": 1}, {"id": 2}]  # noqa: F821
+            mock_client.query.side_effect = lambda collection_name, filter, **kwargs: (
+                queried.append(filter) or [{"id": 1}, {"id": 2}]  # noqa: F821
+            )
         if "deleted" in locals():
-            mock_client.delete.side_effect = lambda collection_name, filter, **kwargs: deleted.append(filter) or {"delete_count": 2}  # noqa: F821
+            mock_client.delete.side_effect = lambda collection_name, filter, **kwargs: (
+                deleted.append(filter) or {"delete_count": 2}  # noqa: F821
+            )
         else:
             mock_client.delete.return_value = {"delete_count": 2}
         if "inserted" in locals():
             mock_client.insert.side_effect = lambda collection_name, data, **kwargs: inserted.extend(data)  # noqa: F821
         monkeypatch.setattr(milvus_store, "MilvusClient", lambda *args, **kwargs: mock_client)
-        
-        module.store_milvus.python_func(
 
+        module.store_milvus.python_func(
             embedded_data=SimpleNamespace(path=str(input_path)),
             milvus_host="milvus.test",
             milvus_port="19530",
             collection_name="kubeflow_docs",
             clean_rebuild=False,
-        clean_rebuild_confirmation="",
-        maintenance_lock_token="",
+            clean_rebuild_confirmation="",
+            maintenance_lock_token="",
         )
